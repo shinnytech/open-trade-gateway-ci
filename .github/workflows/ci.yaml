@@ -1,0 +1,192 @@
+name: CI for open-trade-gateway-ci
+run-name: ${{ github.event.client_payload.title }}
+
+on:
+  repository_dispatch:
+    types: [run-open-trade-gateway-ci]
+
+jobs:
+  setup:
+    name: Prepare & notify upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump GitHub context
+        env:
+          GITHUB_CONTEXT: ${{ toJson(github) }}
+        run: echo "$GITHUB_CONTEXT"
+
+      - name: Comment workflow URL back to open-trade-gateway PR
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          token: ${{ secrets.KYLIN_CI }}
+          repository: shinnytech/open-trade-gateway-private
+          issue-number: ${{ github.event.client_payload.pr_number }}
+          comment-id: ${{ github.event.client_payload.comment_id }}
+          body: |
+            - Workflow URL: https://github.com/shinnytech/open-trade-gateway-ci/actions/runs/${{ github.run_id }}
+
+      - name: Checkout upstream code
+        uses: actions/checkout@v4
+        with:
+          repository: shinnytech/open-trade-gateway-private
+          ref: ${{ github.event.client_payload.ref }}
+          token: ${{ secrets.KYLIN_CI }}
+
+  build-on-kylin-arm:
+    name: Build Kylin ARM
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    env:
+      VCPKG_FORCE_SYSTEM_BINARIES: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04-arm]
+        build-type: [Release]
+        include:
+          - os: ubuntu-22.04-arm
+            triplet: arm64-linux
+            build-type: Release
+    container:
+      image: ghcr.io/shinny-gaowen/kylin-dev-arm:12
+      options: --shm-size=2g --user root
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.KYLIN_CI }}
+
+    steps:
+      - name: Install ARM64 ossutil
+        run: |
+          mkdir -p $HOME/bin
+          curl -sSL https://gosspublic.alicdn.com/ossutil/1.7.14/ossutilarm64 \
+            -o $HOME/bin/ossutil
+          chmod +x $HOME/bin/ossutil
+          echo "$HOME/bin" >> $GITHUB_PATH
+      - name: Config ossutil
+        run: |
+          ossutil config \
+            --endpoint "oss-accelerate.aliyuncs.com" \
+            --access-key-id "${{ secrets.OSS_ACCESS_KEY }}" \
+            --access-key-secret "${{ secrets.OSS_SECRET_KEY }}"
+            
+      - name: Install dependencies
+        run: |
+          yum install -y zlib zlib-devel bzip2 bzip2-devel xz xz-devel flex bison git git-lfs wget openssl-devel
+          yum install -y curl zip unzip tar
+          yum install -y pkgconfig
+          yum install -y autoconf automake libtool
+          yum install -y python3 python3-pip
+          yum install -y elfutils-libelf elfutils-libelf-devel
+          # Install Go
+          cd /tmp
+          wget https://go.dev/dl/go1.25.0.linux-arm64.tar.gz
+          tar -C /usr/local -xzf go1.25.0.linux-arm64.tar.gz
+          export PATH=$PATH:/usr/local/go/bin
+          go version
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
+          cmake --version
+      - name: set env variables
+        run: |
+          echo "CC=/usr/local/bin/gcc"  >> $GITHUB_ENV
+          echo "CXX=/usr/local/bin/g++" >> $GITHUB_ENV
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: shinnytech/open-trade-gateway-private
+          ref: ${{ github.event.client_payload.ref }}
+          token: ${{ secrets.KYLIN_CI }}
+          submodules: true
+          fetch-depth: 1
+          lfs: true  
+          
+      - name: Run vcpkg
+        uses: lukka/run-vcpkg@v7
+        with:
+          vcpkgArguments: "@/__w/open-trade-gateway-ci/open-trade-gateway-ci/vcpkg-arm64-linux.txt  --overlay-ports=/__w/open-trade-gateway-ci/open-trade-gateway-ci/ports-overlay/openssl"
+          vcpkgDirectory: "/__w/open-trade-gateway-ci/open-trade-gateway-ci/vcpkg"
+          appendedCacheKey: ${{ hashFiles('/__w/open-trade-gateway-ci/open-trade-gateway-ci/vcpkg-arm64-linux.txt') }}
+          vcpkgGitCommitId: "b322364f06308bdd24823f9d8f03fe0cc86fd46f"
+
+      - name: Setup oss dist path on tag
+        if: startsWith(github.event.client_payload.ref, 'refs/tags')
+        shell: bash
+        run: |
+          GITHUB_REF=${{ github.event.client_payload.ref }}
+          GITHUB_SHA="${{ github.event.client_payload.sha }}"
+          echo "DEST_DIR=$(echo ${GITHUB_REF##*/})" >> $GITHUB_ENV
+          echo "PACK_VERSION=$(echo ${GITHUB_REF##*/})" >> $GITHUB_ENV
+
+      - name: Setup oss dist path on commit
+        if: startsWith(github.event.client_payload.ref, 'refs/tags') != true
+        shell: bash
+        run: |
+          GITHUB_REF=${{ github.event.client_payload.ref }}
+          GITHUB_SHA="${{ github.event.client_payload.sha }}"
+          echo "DEST_DIR=$(echo ${GITHUB_REF##*/})/$(echo ${GITHUB_SHA:0:7})" >> $GITHUB_ENV
+          echo "PACK_VERSION=$(echo ${GITHUB_REF##*/})_$(echo ${GITHUB_SHA:0:7})" >> $GITHUB_ENV
+
+      - name: Build
+        run: |
+          cd /__w/open-trade-gateway-ci/open-trade-gateway-ci
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=/__w/open-trade-gateway-ci/open-trade-gateway-ci/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release -DVERSION_STR=${{env.DEST_DIR}} -DDISABLE_XC=OFF -DXC_ARM=ON
+          cat /__w/open-trade-gateway-ci/open-trade-gateway-ci/open-trade-common/version.h
+          cmake --build . -j 2
+          # Build Go tools
+          cd ../tools/otgctl
+          go mod tidy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -tags=netgo,osusergo -ldflags="-s -w -X main.version=${PACK_VERSION} -X main.commit=${GITHUB_SHA} -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o otgctl .
+          chmod +x otgctl
+
+      - name: Release Package
+        run: |
+          cd /__w/open-trade-gateway-ci/open-trade-gateway-ci
+          mkdir -p package
+          cd package
+          ossutil cp -rf oss://shinny-cd/open-trade-gateway/kq_gateway_pack_example_debian11.tar.gz /__w/open-trade-gateway-ci/open-trade-gateway-ci/package/
+          tar -xvf kq_gateway_pack_example_debian11.tar.gz
+          rm -rf ./opt/packages
+          cp -r ../dist/bin/open-trade-* ./usr/local/bin/
+          cp -r ../contrib/xc/* ./usr/local/bin/
+          rm ./usr/local/bin/run_apigateway
+          rm ./usr/local/bin/run_apigateway_x86
+          mv ./usr/local/bin/run_apigateway_arm ./usr/local/bin/run_apigateway
+          chmod +x ./usr/local/bin/run_apigateway
+          cp -r ../dist/bin/*.so ./usr/local/lib/
+          cp -r ../dist/api/ws*.json ./etc/api-gateway/
+          cp -r ../dist/conf/*.json ./etc/open-trade-gateway/
+          cp  /usr/local/lib64/libstdc++.so.6 ./usr/local/lib/
+          cp ../dist/conf/open-trade-gateway.service ./etc/systemd/system/
+          cp ../tools/otgctl/otgctl ./usr/local/bin/
+          tar -zcvf kq_gateway_pack_${PACK_VERSION}_kylin-arm.tar.gz ./usr ./var ./etc ./opt
+
+      - name: Upload to oss
+        run: |
+          ossutil cp -rf dist oss://shinny-cd/open-trade-gateway/${DEST_DIR}-kylin-arm/
+          ossutil cp -rf package/kq_gateway_pack_${PACK_VERSION}_kylin-arm.tar.gz oss://shinny-cd/open-trade-gateway/${DEST_DIR}-kylin-arm/
+
+  summary:
+    name: Summary CI result
+    needs: build-on-kylin-arm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find Comment
+        uses: peter-evans/find-comment@v1
+        id: find_summary
+        with:
+          repository: shinnytech/open-trade-gateway-private
+          token: ${{ secrets.KYLIN_CI }}
+          issue-number: ${{ github.event.client_payload.pr_number }}
+          body-includes: https://github.com/shinnytech/open-trade-gateway-ci/actions/runs/${{ github.run_id }}
+      - name: Add success comment
+        uses: peter-evans/create-or-update-comment@v1
+        with:
+          token: ${{ secrets.KYLIN_CI }}
+          repository: shinnytech/open-trade-gateway-private
+          issue-number: ${{ github.event.client_payload.pr_number }}
+          comment-id: ${{ steps.find_summary.outputs.comment-id }}
+          body: |
+            Workflow run ${{ github.run_id }} succeeded! 🎉
+          reactions: '+1'
