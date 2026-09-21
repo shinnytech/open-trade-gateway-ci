@@ -1,0 +1,326 @@
+name: OTG Go Kylin ARM64 release
+run-name: otg-go ARM64 ${{ github.event.client_payload.request_id }}
+
+on:
+  repository_dispatch:
+    types: [run-otg-go-arm64-release]
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: otg-go-arm64-${{ github.event.client_payload.version }}
+  cancel-in-progress: false
+
+env:
+  OSS_ENDPOINT: https://oss-accelerate.aliyuncs.com
+  OSS_REGION: cn-shanghai
+  OSS_BUCKET: shinny-cd
+  OSS_PREFIX: otg-go
+  SOFTWARE_PAYLOAD_ARCH: arm64
+  SOFTWARE_PAYLOAD_VARIANT: kylin-xc
+  DIST_SOFTWARE: dist/xc/software
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 115
+    steps:
+      - name: Validate upstream release request
+        id: request
+        env:
+          GH_TOKEN: ${{ secrets.KYLIN_CI }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, re, urllib.request
+          with open(os.environ['GITHUB_EVENT_PATH']) as handle:
+              payload = json.load(handle)['client_payload']
+          patterns = {
+              'request_id': r'[0-9a-f]{32}',
+              'source_sha': r'[0-9a-f]{40}',
+              'version': r'[0-9]+\.[0-9]+\.[0-9]+([.+~-][0-9A-Za-z][0-9A-Za-z.+~-]*)?',
+              'upstream_run_id': r'[0-9]+', 'upstream_run_attempt': r'[0-9]+',
+          }
+          for key, pattern in patterns.items():
+              if not isinstance(payload.get(key), str) or not re.fullmatch(pattern, payload[key]):
+                  raise SystemExit('invalid dispatch field: ' + key)
+          request = urllib.request.Request(
+              'https://api.github.com/repos/shinnytech/otg-go/actions/runs/' + payload['upstream_run_id'],
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              run = json.load(response)
+          if (run['path'] != '.github/workflows/release-payload.yml'
+                  or run['event'] not in ('push', 'pull_request_target')
+                  or run['head_sha'] != payload['source_sha']
+                  or str(run['run_attempt']) != payload['upstream_run_attempt']):
+              raise SystemExit('request does not identify an upstream release run')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key in patterns:
+                  output.write(key + '=' + payload[key] + '\n')
+              output.write('source_event=' + run['event'] + '\n')
+          PYCODE
+
+      - name: Checkout exact upstream commit
+        uses: actions/checkout@v4
+        with:
+          repository: shinnytech/otg-go
+          ref: ${{ steps.request.outputs.source_sha }}
+          token: ${{ secrets.KYLIN_CI }}
+          persist-credentials: false
+          fetch-depth: 0
+          lfs: true
+
+      - name: Verify release identity
+        env:
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.request.outputs.version }}
+          SOURCE_EVENT: ${{ steps.request.outputs.source_event }}
+          UPSTREAM_RUN_ID: ${{ steps.request.outputs.upstream_run_id }}
+          UPSTREAM_RUN_ATTEMPT: ${{ steps.request.outputs.upstream_run_attempt }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
+          if [[ "${SOURCE_EVENT}" == pull_request_target ]]; then
+            git merge-base --is-ancestor "${SOURCE_SHA}" refs/remotes/origin/master
+            base_version="$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*')"
+            test "${RELEASE_VERSION}" = "${base_version}+master.${SOURCE_SHA:0:12}.${UPSTREAM_RUN_ID}.${UPSTREAM_RUN_ATTEMPT}"
+          else
+            test "$(git rev-list -n 1 "refs/tags/${RELEASE_VERSION}")" = "${SOURCE_SHA}"
+          fi
+          echo "OTG_VERSION=${RELEASE_VERSION}" >> "${GITHUB_ENV}"
+          echo "COMMIT_SHA=${SOURCE_SHA}" >> "${GITHUB_ENV}"
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "${GITHUB_ENV}"
+          git lfs checkout
+          file deploy/api-gateway/api-gateway-arm64 | grep -q 'ARM aarch64'
+          file contrib/lib/libthosttraderapi_se_xc_arm.so | grep -q 'ARM aarch64'
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+          cache: false
+
+      - name: Login to Kylin build registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.KYLIN_CI }}
+
+      - name: Install Gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) gitleaks_arch="x64" ;;
+            aarch64|arm64) gitleaks_arch="arm64" ;;
+            *) echo "Unsupported architecture: $(uname -m)" >&2; exit 2 ;;
+          esac
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_${gitleaks_arch}.tar.gz"
+          checksums="gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          download_dir="$(mktemp -d)"
+          install_dir="${RUNNER_TEMP}/gitleaks-bin"
+          mkdir -p "${install_dir}"
+          curl -fsSL -o "${download_dir}/${asset}" "${base_url}/${asset}"
+          curl -fsSL -o "${download_dir}/${checksums}" "${base_url}/${checksums}"
+          grep "  ${asset}$" "${download_dir}/${checksums}" |
+            (cd "${download_dir}" && sha256sum -c -)
+          tar -xzf "${download_dir}/${asset}" -C "${download_dir}" gitleaks
+          install -m 0755 "${download_dir}/gitleaks" "${install_dir}/gitleaks"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+
+      - name: Build and audit release payload
+        run: |
+          set -euo pipefail
+          audit_dir="${RUNNER_TEMP}/release-payload-audit"
+          mkdir -p "${audit_dir}" coverage
+          build_log="${audit_dir}/build.log"
+          audit_report="${audit_dir}/report.json"
+          (
+            cd otg-go/cmd/instance-deploy
+            CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+              -o "${RUNNER_TEMP}/instance-deploy" .
+          )
+          set +e
+          scripts/build_release_payload.sh >"${build_log}" 2>&1
+          build_status=$?
+          set -e
+          "${RUNNER_TEMP}/instance-deploy" audit-secrets \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --path "${GITHUB_WORKSPACE}/dist" \
+            --path "${build_log}" \
+            --report "${audit_report}"
+          cat "${build_log}"
+          if [ "${build_status}" -ne 0 ]; then
+            exit "${build_status}"
+          fi
+          cp "${audit_report}" coverage/release-payload-secret-audit.json
+
+      - name: Verify release artifacts
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          payloads=("${DIST_SOFTWARE}"/otg-go_"${OTG_VERSION}"_*.tar.gz)
+          if [ "${#payloads[@]}" -ne 1 ]; then
+            echo "Expected exactly one payload for ${OTG_VERSION}, got ${#payloads[@]}" >&2
+            exit 1
+          fi
+          payload="${payloads[0]}"
+          digest="${payload}.sha256"
+          test -f "${digest}"
+          (
+            cd "$(dirname "${payload}")"
+            sha256sum -c "$(basename "${digest}")"
+          )
+          python3 scripts/software_payload.py verify --archive "${payload}"
+
+      - name: Smoke ARM64 programs and XC mode contracts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          root = pathlib.Path('dist/xc/software/stage').resolve()
+          # 打包器已独立核验所有 ELF 架构和依赖；这里在原生 ARM runner 实际执行入口。
+          for command in (
+              ['bin/otg', '-v'], ['bin/otgctl', 'version'], ['bin/api-gateway', '--help'],
+              ['tools/instance-deploy', 'help'], ['tools/instance-deploy', 'upload-receipt', '--help'],
+              ['tools/jq', '--version'],
+          ):
+              subprocess.run([str(root / command[0]), *command[1:]], check=True, timeout=30)
+          PY
+          go -C otg-go test -tags ctp_xc ./internal/backend/ctp/betterctp ./internal/backend/enginefactory
+
+      - name: Install ossutil
+        env:
+          OSSUTIL_VERSION: 2.3.0
+          OSSUTIL_LINUX_ARM64_SHA256: f6c95ba0c2d2ef30290af686ce4d706c701f4734ce8090bee4288a77e3f1d764
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          archive="ossutil-${OSSUTIL_VERSION}-linux-arm64.zip"
+          download_dir="$(mktemp -d)"
+          install_dir="${RUNNER_TEMP}/ossutil-bin"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "${download_dir}/${archive}" \
+            "https://gosspublic.alicdn.com/ossutil/v2/${OSSUTIL_VERSION}/${archive}"
+          printf '%s  %s\n' \
+            "${OSSUTIL_LINUX_ARM64_SHA256}" \
+            "${download_dir}/${archive}" | sha256sum -c -
+          unzip -q "${download_dir}/${archive}" -d "${download_dir}/extracted"
+          ossutil_path="$(find "${download_dir}/extracted" -type f -name ossutil -print -quit)"
+          test -n "${ossutil_path}"
+          mkdir -p "${install_dir}"
+          install -m 0755 "${ossutil_path}" "${install_dir}/ossutil"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+          "${install_dir}/ossutil" version
+
+      - name: Publish immutable release payload
+        env:
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          payloads=("${DIST_SOFTWARE}"/otg-go_"${OTG_VERSION}"_*.tar.gz)
+          payload="${payloads[0]}"
+          digest="${payload}.sha256"
+          base="oss://${OSS_BUCKET}/${OSS_PREFIX}/${OTG_VERSION}/dist/software"
+          remote_payload="${base}/$(basename "${payload}")"
+          remote_digest="${base}/$(basename "${digest}")"
+          inspection_dir="$(mktemp -d)"
+
+          # `ossutil stat` also reads the object ACL. HeadObject only needs the
+          # object-read permission already required by the immutability checks.
+          object_exists() {
+            local object="$1"
+            local report="$2"
+            local bucket_prefix="oss://${OSS_BUCKET}/"
+            local key
+            if [[ "${object}" != "${bucket_prefix}"* ]]; then
+              echo "release object is outside the configured OSS bucket: ${object}" >&2
+              return 2
+            fi
+            key="${object#"${bucket_prefix}"}"
+            if ossutil api head-object \
+              --bucket "${OSS_BUCKET}" \
+              --key "${key}" \
+              --output-format json >"${report}" 2>&1; then
+              return 0
+            fi
+            if grep -Eiq '(^|[^0-9])404([^0-9]|$)|NoSuchKey|not exist' "${report}"; then
+              return 1
+            fi
+            cat "${report}" >&2
+            return 2
+          }
+
+          if object_exists "${remote_digest}" "${inspection_dir}/digest.head"; then
+            ossutil cp -f "${remote_digest}" "${inspection_dir}/remote.sha256"
+            local_sha="$(awk 'NR == 1 {print $1}' "${digest}")"
+            remote_sha="$(awk 'NR == 1 {print $1}' "${inspection_dir}/remote.sha256")"
+            if [ "${local_sha}" != "${remote_sha}" ]; then
+              echo "Refusing to overwrite release ${OTG_VERSION} with a different payload" >&2
+              exit 1
+            fi
+            if object_exists "${remote_payload}" "${inspection_dir}/payload.head"; then
+              echo "Release payload ${OTG_VERSION} already exists with the same digest"
+            else
+              status=$?
+              [ "${status}" -eq 1 ] || exit "${status}"
+              ossutil cp "${payload}" "${remote_payload}"
+            fi
+            exit 0
+          else
+            status=$?
+            [ "${status}" -eq 1 ] || exit "${status}"
+          fi
+
+          if object_exists "${remote_payload}" "${inspection_dir}/payload.head"; then
+            ossutil cp -f "${remote_payload}" "${inspection_dir}/remote.tar.gz"
+            local_sha="$(awk 'NR == 1 {print $1}' "${digest}")"
+            remote_sha="$(sha256sum "${inspection_dir}/remote.tar.gz" | awk '{print $1}')"
+            if [ "${local_sha}" != "${remote_sha}" ]; then
+              echo "Refusing to overwrite payload without a matching remote digest" >&2
+              exit 1
+            fi
+            ossutil cp "${digest}" "${remote_digest}"
+            exit 0
+          else
+            status=$?
+            [ "${status}" -eq 1 ] || exit "${status}"
+          fi
+
+          ossutil cp "${payload}" "${remote_payload}"
+          ossutil cp "${digest}" "${remote_digest}"
+
+      - name: Report published release
+        run: |
+          set -euo pipefail
+          suffix="${SOFTWARE_PAYLOAD_VARIANT:+_${SOFTWARE_PAYLOAD_VARIANT}}"
+          artifact="oss://${OSS_BUCKET}/${OSS_PREFIX}/${OTG_VERSION}/dist/software/otg-go_${OTG_VERSION}_arm64${suffix}.tar.gz"
+          {
+            echo '## 可用于实例组包的软件包'
+            echo
+            echo '```yaml'
+            echo 'release:'
+            echo '  package: otg-go'
+            echo "  version: ${OTG_VERSION}"
+            echo '  architecture: arm64'
+            if [[ -n "${SOFTWARE_PAYLOAD_VARIANT}" ]]; then
+              echo "  variant: ${SOFTWARE_PAYLOAD_VARIANT}"
+            fi
+            echo '```'
+            echo
+            echo "软件包：\`${artifact}\`"
+            echo
+            echo "校验文件：\`${artifact}.sha256\`"
+            echo
+            echo '将版本写入对应实例声明并提交后，运行 `make prepare-instance-deployment INSTANCE=<实例ID>`。'
+            echo '组包机通过已配置的 ossutil 下载包；目标机只接收生成的实例 .sh。'
+            if [[ "${GITHUB_EVENT_NAME}" == "pull_request_target" ]]; then
+              echo '此版本来自合并到 master 的提交，不会修改公共默认版本或已有实例配置。'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
