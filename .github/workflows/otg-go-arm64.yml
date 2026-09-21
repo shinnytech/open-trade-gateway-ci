@@ -52,9 +52,20 @@ jobs:
               run = json.load(response)
           if (run['path'] != '.github/workflows/release-payload.yml'
                   or run['event'] not in ('push', 'pull_request_target')
-                  or run['head_sha'] != payload['source_sha']
                   or str(run['run_attempt']) != payload['upstream_run_attempt']):
               raise SystemExit('request does not identify an upstream release run')
+          if run['event'] == 'push':
+              if run['head_sha'] != payload['source_sha']:
+                  raise SystemExit('tag run does not match source commit')
+          else:
+              # pull_request_target 运行记录的 head_sha 是 PR head；实际发布的是 merge_commit_sha。
+              request.full_url = 'https://api.github.com/repos/shinnytech/otg-go/commits/' + payload['source_sha'] + '/pulls'
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  pulls = json.load(response)
+              if not any(pr['merged_at'] and pr['merge_commit_sha'] == payload['source_sha']
+                         and pr['base']['ref'] == 'master' and pr['base']['repo']['full_name'] == 'shinnytech/otg-go'
+                         and pr['head']['sha'] == run['head_sha'] for pr in pulls):
+                  raise SystemExit('source is not the master merge of the upstream PR')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               for key in patterns:
                   output.write(key + '=' + payload[key] + '\n')
@@ -83,8 +94,12 @@ jobs:
           test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
           if [[ "${SOURCE_EVENT}" == pull_request_target ]]; then
             git merge-base --is-ancestor "${SOURCE_SHA}" refs/remotes/origin/master
-            base_version="$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*')"
-            test "${RELEASE_VERSION}" = "${base_version}+master.${SOURCE_SHA:0:12}.${UPSTREAM_RUN_ID}.${UPSTREAM_RUN_ATTEMPT}"
+            suffix="+master.${SOURCE_SHA:0:12}.${UPSTREAM_RUN_ID}.${UPSTREAM_RUN_ATTEMPT}"
+            [[ "${RELEASE_VERSION}" == *"${suffix}" ]]
+            base_version="${RELEASE_VERSION%"${suffix}"}"
+            [[ "${base_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            # 排队期间可能出现新 tag；只核对上游已选定的基线，不重新选版本。
+            git merge-base --is-ancestor "refs/tags/${base_version}" "${SOURCE_SHA}"
           else
             test "$(git rev-list -n 1 "refs/tags/${RELEASE_VERSION}")" = "${SOURCE_SHA}"
           fi
@@ -193,6 +208,31 @@ jobs:
           PY
           go -C otg-go test -tags ctp_xc ./internal/backend/ctp/betterctp ./internal/backend/enginefactory
 
+      - name: Smoke private runtime inside Kylin ARM64
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --cap-add NET_ADMIN \
+            --mount "type=bind,src=${PWD}/${DIST_SOFTWARE}/stage,dst=/opt/otg-go/current,readonly" \
+            --entrypoint /bin/bash \
+            ghcr.io/shinny-gaowen/kylin-dev-arm:12@sha256:a59701504bdf1675fcd32cec2d34fc299117fc9cbeab7d9457eaefe4c9352893 -ceu '
+              unset LD_LIBRARY_PATH LD_PRELOAD
+              cd /opt/otg-go/current
+              bin/otg -v
+              bin/otgctl version
+              bin/api-gateway --help
+              tools/instance-deploy help
+              tools/jq --version
+              for wrapper in bin/ctp-wrapper bin/ctp-cp-wrapper; do
+                status=0
+                "$wrapper" >/tmp/wrapper-usage.log 2>&1 || status=$?
+                test "$status" -eq 255
+                grep -q "Usage: ctp-wrapper" /tmp/wrapper-usage.log
+              done
+              tools/otg-api-gateway-firewall.sh start
+              tools/otg-api-gateway-firewall.sh verify
+              tools/otg-api-gateway-firewall.sh stop
+            '
+
       - name: Install ossutil
         env:
           OSSUTIL_VERSION: 2.3.0
@@ -297,6 +337,8 @@ jobs:
           ossutil cp "${digest}" "${remote_digest}"
 
       - name: Report published release
+        env:
+          SOURCE_EVENT: ${{ steps.request.outputs.source_event }}
         run: |
           set -euo pipefail
           suffix="${SOFTWARE_PAYLOAD_VARIANT:+_${SOFTWARE_PAYLOAD_VARIANT}}"
@@ -320,7 +362,7 @@ jobs:
             echo
             echo '将版本写入对应实例声明并提交后，运行 `make prepare-instance-deployment INSTANCE=<实例ID>`。'
             echo '组包机通过已配置的 ossutil 下载包；目标机只接收生成的实例 .sh。'
-            if [[ "${GITHUB_EVENT_NAME}" == "pull_request_target" ]]; then
+            if [[ "${SOURCE_EVENT}" == "pull_request_target" ]]; then
               echo '此版本来自合并到 master 的提交，不会修改公共默认版本或已有实例配置。'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"

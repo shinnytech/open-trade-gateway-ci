@@ -13,14 +13,14 @@ jobs:
       SOFTWARE_PAYLOAD_ARCH: arm64
       SOFTWARE_PAYLOAD_VARIANT: kylin-xc
       DIST_SOFTWARE: dist/xc/software
-      OTG_VERSION: 2.3.14+arm64.validation.075bb2d129b9
-      COMMIT_SHA: 075bb2d129b9be42018aa36f7f2ab4c9c89e913a
+      OTG_VERSION: 2.3.14+arm64.validation.4154a34181cd
+      COMMIT_SHA: 4154a34181cde3511d3f244acf6dc59c847d951d
     steps:
       - name: Checkout implementation for one-time validation
         uses: actions/checkout@v4
         with:
           repository: shinnytech/otg-go
-          ref: 075bb2d129b9be42018aa36f7f2ab4c9c89e913a
+          ref: 4154a34181cde3511d3f244acf6dc59c847d951d
           token: ${{ secrets.KYLIN_CI }}
           persist-credentials: false
           fetch-depth: 1
@@ -125,4 +125,29 @@ jobs:
               subprocess.run([str(root / command[0]), *command[1:]], check=True, timeout=30)
           PY
           go -C otg-go test -tags ctp_xc ./internal/backend/ctp/betterctp ./internal/backend/enginefactory
+
+      - name: Smoke private runtime inside Kylin ARM64
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --cap-add NET_ADMIN \
+            --mount "type=bind,src=${PWD}/${DIST_SOFTWARE}/stage,dst=/opt/otg-go/current,readonly" \
+            --entrypoint /bin/bash \
+            ghcr.io/shinny-gaowen/kylin-dev-arm:12@sha256:a59701504bdf1675fcd32cec2d34fc299117fc9cbeab7d9457eaefe4c9352893 -ceu '
+              unset LD_LIBRARY_PATH LD_PRELOAD
+              cd /opt/otg-go/current
+              bin/otg -v
+              bin/otgctl version
+              bin/api-gateway --help
+              tools/instance-deploy help
+              tools/jq --version
+              for wrapper in bin/ctp-wrapper bin/ctp-cp-wrapper; do
+                status=0
+                "$wrapper" >/tmp/wrapper-usage.log 2>&1 || status=$?
+                test "$status" -eq 255
+                grep -q "Usage: ctp-wrapper" /tmp/wrapper-usage.log
+              done
+              tools/otg-api-gateway-firewall.sh start
+              tools/otg-api-gateway-firewall.sh verify
+              tools/otg-api-gateway-firewall.sh stop
+            '
 
