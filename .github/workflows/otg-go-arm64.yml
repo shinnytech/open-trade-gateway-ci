@@ -51,21 +51,35 @@ jobs:
           with urllib.request.urlopen(request, timeout=30) as response:
               run = json.load(response)
           if (run['path'] != '.github/workflows/release-payload.yml'
-                  or run['event'] not in ('push', 'pull_request_target')
+                  or run['event'] != 'push'
+                  or run['head_sha'] != payload['source_sha']
+                  or run['head_branch'] != payload['version']
                   or str(run['run_attempt']) != payload['upstream_run_attempt']):
-              raise SystemExit('request does not identify an upstream release run')
-          if run['event'] == 'push':
-              if run['head_sha'] != payload['source_sha']:
-                  raise SystemExit('tag run does not match source commit')
-          else:
-              # pull_request_target 运行记录的 head_sha 是 PR head；实际发布的是 merge_commit_sha。
-              request.full_url = 'https://api.github.com/repos/shinnytech/otg-go/commits/' + payload['source_sha'] + '/pulls'
+              raise SystemExit('request does not identify the matching upstream tag release')
+          # Tag 对象允许 annotated tag，但必须最终解析到实际构建的提交。
+          request.full_url = 'https://api.github.com/repos/shinnytech/otg-go/git/ref/tags/' + payload['version']
+          with urllib.request.urlopen(request, timeout=30) as response:
+              obj = json.load(response)['object']
+          while obj['type'] == 'tag':
+              request.full_url = 'https://api.github.com/repos/shinnytech/otg-go/git/tags/' + obj['sha']
               with urllib.request.urlopen(request, timeout=30) as response:
-                  pulls = json.load(response)
-              if not any(pr['merged_at'] and pr['merge_commit_sha'] == payload['source_sha']
-                         and pr['base']['ref'] == 'master' and pr['base']['repo']['full_name'] == 'shinnytech/otg-go'
-                         and pr['head']['sha'] == run['head_sha'] for pr in pulls):
-                  raise SystemExit('source is not the master merge of the upstream PR')
+                  obj = json.load(response)['object']
+          if obj['type'] != 'commit' or obj['sha'] != payload['source_sha']:
+              raise SystemExit('release tag does not match source commit')
+          # 外部调用不得在上游 QA 或包验证失败/未完成时直接发布。
+          request.full_url = ('https://api.github.com/repos/shinnytech/otg-go/actions/runs/'
+                              + payload['upstream_run_id'] + '/attempts/'
+                              + payload['upstream_run_attempt'] + '/jobs?per_page=100')
+          with urllib.request.urlopen(request, timeout=30) as response:
+              jobs = json.load(response)['jobs']
+          required = {'Build standard payload', 'Build kylin-xc payload'}
+          for suite in ('buster', 'bullseye', 'bookworm', 'trixie'):
+              required.update(('Debian runtime (' + suite + ')', 'Debian lifecycle (' + suite + ')'))
+          passed = {job['name'] for job in jobs if job['status'] == 'completed' and job['conclusion'] == 'success'}
+          if (not required.issubset(passed)
+                  or not any(name.endswith('/ Full QA') for name in passed)
+                  or not any(name.endswith('/ QA') for name in passed)):
+              raise SystemExit('upstream functional QA or package validation has not succeeded')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               for key in patterns:
                   output.write(key + '=' + payload[key] + '\n')
@@ -92,17 +106,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${SOURCE_SHA}"
-          if [[ "${SOURCE_EVENT}" == pull_request_target ]]; then
-            git merge-base --is-ancestor "${SOURCE_SHA}" refs/remotes/origin/master
-            suffix="+master.${SOURCE_SHA:0:12}.${UPSTREAM_RUN_ID}.${UPSTREAM_RUN_ATTEMPT}"
-            [[ "${RELEASE_VERSION}" == *"${suffix}" ]]
-            base_version="${RELEASE_VERSION%"${suffix}"}"
-            [[ "${base_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-            # 排队期间可能出现新 tag；只核对上游已选定的基线，不重新选版本。
-            git merge-base --is-ancestor "refs/tags/${base_version}" "${SOURCE_SHA}"
-          else
-            test "$(git rev-list -n 1 "refs/tags/${RELEASE_VERSION}")" = "${SOURCE_SHA}"
-          fi
+          test "${SOURCE_EVENT}" = push
+          test "$(git rev-list -n 1 "refs/tags/${RELEASE_VERSION}")" = "${SOURCE_SHA}"
           echo "OTG_VERSION=${RELEASE_VERSION}" >> "${GITHUB_ENV}"
           echo "COMMIT_SHA=${SOURCE_SHA}" >> "${GITHUB_ENV}"
           echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "${GITHUB_ENV}"
@@ -206,7 +211,12 @@ jobs:
           ):
               subprocess.run([str(root / command[0]), *command[1:]], check=True, timeout=30)
           PY
-          go -C otg-go test -tags ctp_xc ./internal/backend/ctp/betterctp ./internal/backend/enginefactory
+          if test -d otg-go/internal/backend/ctp/ctp; then
+            go -C otg-go test ./internal/backend/ctp/ctp ./internal/accountenginefactory
+          else
+            # 上线前保留当前 master 的结构兼容性。
+            go -C otg-go test -tags ctp_xc ./internal/backend/ctp/betterctp ./internal/backend/enginefactory
+          fi
 
       - name: Smoke private runtime inside Kylin ARM64
         run: |
