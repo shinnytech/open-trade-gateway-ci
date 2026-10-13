@@ -1,16 +1,26 @@
 name: OTG Go Kylin ARM64 release
-run-name: otg-go ARM64 ${{ github.event.client_payload.request_id }}
+run-name: otg-go ARM64 ${{ github.event.client_payload.request_id || inputs.version }}
 
 on:
   repository_dispatch:
     types: [run-otg-go-arm64-release]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: 2.3.16 XC ARM64 分支的完整提交 SHA
+        required: true
+        type: string
+      version:
+        description: 软件包版本
+        required: true
+        type: string
 
 permissions:
   contents: read
   packages: read
 
 concurrency:
-  group: otg-go-arm64-${{ github.event.client_payload.version }}
+  group: otg-go-arm64-${{ github.event.client_payload.version || inputs.version }}
   cancel-in-progress: false
 
 env:
@@ -28,6 +38,7 @@ jobs:
     timeout-minutes: 115
     steps:
       - name: Validate upstream release request
+        if: github.event_name == 'repository_dispatch'
         id: request
         env:
           GH_TOKEN: ${{ secrets.KYLIN_CI }}
@@ -72,11 +83,38 @@ jobs:
               output.write('source_event=' + run['event'] + '\n')
           PYCODE
 
+      - name: Validate 2.3.16 branch request
+        if: github.event_name == 'workflow_dispatch'
+        id: manual
+        env:
+          GH_TOKEN: ${{ secrets.KYLIN_CI }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, re, urllib.request
+          with open(os.environ['GITHUB_EVENT_PATH']) as handle:
+              inputs = json.load(handle)['inputs']
+          source_sha = inputs.get('source_sha', '')
+          if not re.fullmatch(r'[0-9a-f]{40}', source_sha) or inputs.get('version') != '2.3.16':
+              raise SystemExit('expected the exact 2.3.16 XC ARM64 branch SHA and version')
+          request = urllib.request.Request(
+              'https://api.github.com/repos/shinnytech/otg-go/git/ref/heads/release/2.3.16-xc-arm64',
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                       'Accept': 'application/vnd.github+json'})
+          with urllib.request.urlopen(request, timeout=30) as response:
+              branch = json.load(response)
+          if branch['object']['sha'] != source_sha:
+              raise SystemExit('source SHA is not the current 2.3.16 XC ARM64 branch head')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('source_sha=' + source_sha + '\n')
+              output.write('version=2.3.16\n')
+              output.write('source_event=workflow_dispatch\n')
+          PYCODE
+
       - name: Checkout exact upstream commit
         uses: actions/checkout@v4
         with:
           repository: shinnytech/otg-go
-          ref: ${{ steps.request.outputs.source_sha }}
+          ref: ${{ steps.request.outputs.source_sha || steps.manual.outputs.source_sha }}
           token: ${{ secrets.KYLIN_CI }}
           persist-credentials: false
           fetch-depth: 0
@@ -84,9 +122,9 @@ jobs:
 
       - name: Verify release identity
         env:
-          SOURCE_SHA: ${{ steps.request.outputs.source_sha }}
-          RELEASE_VERSION: ${{ steps.request.outputs.version }}
-          SOURCE_EVENT: ${{ steps.request.outputs.source_event }}
+          SOURCE_SHA: ${{ steps.request.outputs.source_sha || steps.manual.outputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.request.outputs.version || steps.manual.outputs.version }}
+          SOURCE_EVENT: ${{ steps.request.outputs.source_event || steps.manual.outputs.source_event }}
           UPSTREAM_RUN_ID: ${{ steps.request.outputs.upstream_run_id }}
           UPSTREAM_RUN_ATTEMPT: ${{ steps.request.outputs.upstream_run_attempt }}
         run: |
@@ -100,6 +138,8 @@ jobs:
             [[ "${base_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
             # 排队期间可能出现新 tag；只核对上游已选定的基线，不重新选版本。
             git merge-base --is-ancestor "refs/tags/${base_version}" "${SOURCE_SHA}"
+          elif [[ "${SOURCE_EVENT}" == workflow_dispatch ]]; then
+            test "${RELEASE_VERSION}" = 2.3.16
           else
             test "$(git rev-list -n 1 "refs/tags/${RELEASE_VERSION}")" = "${SOURCE_SHA}"
           fi
@@ -234,6 +274,7 @@ jobs:
             '
 
       - name: Install ossutil
+        if: github.event_name == 'repository_dispatch'
         env:
           OSSUTIL_VERSION: 2.3.0
           OSSUTIL_LINUX_ARM64_SHA256: f6c95ba0c2d2ef30290af686ce4d706c701f4734ce8090bee4288a77e3f1d764
@@ -258,6 +299,7 @@ jobs:
           "${install_dir}/ossutil" version
 
       - name: Publish immutable release payload
+        if: github.event_name == 'repository_dispatch'
         env:
           OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY }}
           OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_SECRET_KEY }}
@@ -337,6 +379,7 @@ jobs:
           ossutil cp "${digest}" "${remote_digest}"
 
       - name: Report published release
+        if: github.event_name == 'repository_dispatch'
         env:
           SOURCE_EVENT: ${{ steps.request.outputs.source_event }}
         run: |
@@ -366,3 +409,14 @@ jobs:
               echo '此版本来自合并到 master 的提交，不会修改公共默认版本或已有实例配置。'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload 2.3.16 branch payload
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: otg-go-2.3.16-arm64-xc
+          path: |
+            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz
+            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
