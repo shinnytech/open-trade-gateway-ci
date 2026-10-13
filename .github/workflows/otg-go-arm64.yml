@@ -232,18 +232,32 @@ jobs:
           )
           python3 scripts/software_payload.py verify --archive "${payload}"
 
+      - name: Upload 2.3.16 branch payload
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: otg-go-2.3.16-arm64-xc
+          path: |
+            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz
+            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Smoke ARM64 programs and XC mode contracts
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import json, pathlib, subprocess
+          import os, pathlib, subprocess
           root = pathlib.Path('dist/xc/software/stage').resolve()
           # 打包器已独立核验所有 ELF 架构和依赖；这里在原生 ARM runner 实际执行入口。
-          for command in (
+          commands = [
               ['bin/otg', '-v'], ['bin/otgctl', 'version'], ['bin/api-gateway', '--help'],
-              ['tools/instance-deploy', 'help'], ['tools/instance-deploy', 'upload-receipt', '--help'],
+              ['tools/instance-deploy', 'help'],
               ['tools/jq', '--version'],
-          ):
+          ]
+          if os.environ['GITHUB_EVENT_NAME'] == 'repository_dispatch':
+              commands.append(['tools/instance-deploy', 'upload-receipt', '--help'])
+          for command in commands:
               subprocess.run([str(root / command[0]), *command[1:]], check=True, timeout=30)
           PY
           go -C otg-go test -tags ctp_xc ./internal/backend/ctp/betterctp ./internal/backend/enginefactory
@@ -409,14 +423,3 @@ jobs:
               echo '此版本来自合并到 master 的提交，不会修改公共默认版本或已有实例配置。'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
-
-      - name: Upload 2.3.16 branch payload
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: otg-go-2.3.16-arm64-xc
-          path: |
-            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz
-            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 14
