@@ -21,12 +21,22 @@ env:
   SOFTWARE_PAYLOAD_ARCH: arm64
   SOFTWARE_PAYLOAD_VARIANT: kylin-xc
   DIST_SOFTWARE: dist/xc/software
+  TOOLING_SHA: 50bc1fe9f5d954f281ca70724de4830d1fbdd2be
 
 jobs:
   build:
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 115
     steps:
+      - name: Preserve packaging scripts
+        uses: actions/checkout@v4
+        with:
+          path: .arm64-ci
+          persist-credentials: false
+
+      - name: Move packaging scripts outside release source
+        run: mv .arm64-ci "${RUNNER_TEMP}/otg-arm64-ci"
+
       - name: Validate upstream release request
         id: request
         env:
@@ -116,6 +126,22 @@ jobs:
           go-version: '1.25.0'
           cache: false
 
+      - name: Checkout pinned deployment tooling
+        uses: actions/checkout@v4
+        with:
+          repository: shinnytech/otg-go
+          ref: ${{ env.TOOLING_SHA }}
+          path: .arm64-tooling
+          token: ${{ secrets.KYLIN_CI }}
+          persist-credentials: false
+          lfs: false
+
+      - name: Move deployment tooling outside release source
+        run: |
+          set -euo pipefail
+          test "$(git -C .arm64-tooling rev-parse HEAD)" = "${TOOLING_SHA}"
+          mv .arm64-tooling "${RUNNER_TEMP}/otg-go-tooling"
+
       - name: Login to Kylin build registry
         uses: docker/login-action@v3
         with:
@@ -147,15 +173,14 @@ jobs:
           install -m 0755 "${download_dir}/gitleaks" "${install_dir}/gitleaks"
           echo "${install_dir}" >> "${GITHUB_PATH}"
 
-      - name: Build and audit release payload
+      - name: Build release runtime
         run: |
           set -euo pipefail
           audit_dir="${RUNNER_TEMP}/release-payload-audit"
           mkdir -p "${audit_dir}" coverage
           build_log="${audit_dir}/build.log"
-          audit_report="${audit_dir}/report.json"
           (
-            cd otg-go/cmd/instance-deploy
+            cd "${RUNNER_TEMP}/otg-go-tooling/otg-go/cmd/instance-deploy"
             CGO_ENABLED=0 go build -trimpath -buildvcs=false \
               -o "${RUNNER_TEMP}/instance-deploy" .
           )
@@ -167,12 +192,30 @@ jobs:
             --repo-root "${GITHUB_WORKSPACE}" \
             --path "${GITHUB_WORKSPACE}/dist" \
             --path "${build_log}" \
-            --report "${audit_report}"
+            --report "${audit_dir}/report.json"
           cat "${build_log}"
-          if [ "${build_status}" -ne 0 ]; then
-            exit "${build_status}"
-          fi
-          cp "${audit_report}" coverage/release-payload-secret-audit.json
+          exit "${build_status}"
+
+      - name: Repackage with pinned ARM deployment tool and audit
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          tooling="${RUNNER_TEMP}/otg-go-tooling"
+          audit_dir="${RUNNER_TEMP}/release-payload-audit"
+          python3 "${RUNNER_TEMP}/otg-arm64-ci/scripts/repackage_arm64_software.py" \
+            --archive "${DIST_SOFTWARE}/otg-go_${OTG_VERSION}_arm64_kylin-xc.tar.gz" \
+            --stage "${DIST_SOFTWARE}/stage" \
+            --tooling "${tooling}" \
+            --installer "${RUNNER_TEMP}/instance-deploy" \
+            --release-sha "${COMMIT_SHA}" \
+            --tooling-sha "${TOOLING_SHA}" \
+            --source-date-epoch "${SOURCE_DATE_EPOCH}"
+          "${RUNNER_TEMP}/instance-deploy" audit-secrets \
+            --repo-root "${GITHUB_WORKSPACE}" \
+            --path "${GITHUB_WORKSPACE}/dist" \
+            --path "${audit_dir}/build.log" \
+            --report "${audit_dir}/report.json"
+          cp "${audit_dir}/report.json" coverage/release-payload-secret-audit.json
 
       - name: Verify release artifacts
         run: |
@@ -190,7 +233,17 @@ jobs:
             cd "$(dirname "${payload}")"
             sha256sum -c "$(basename "${digest}")"
           )
-          python3 scripts/software_payload.py verify --archive "${payload}"
+          python3 "${RUNNER_TEMP}/otg-go-tooling/scripts/software_payload.py" verify --archive "${payload}"
+
+      - name: Verify final installer with embedded tool on native ARM
+        run: |
+          set -euo pipefail
+          OTG_GENERATED_XC_SOFTWARE_PAYLOAD="${GITHUB_WORKSPACE}/${DIST_SOFTWARE}/otg-go_${OTG_VERSION}_arm64_kylin-xc.tar.gz" \
+          OTG_GENERATED_XC_SOFTWARE_ARCH=arm64 \
+          OTG_GENERATED_XC_SOFTWARE_VERSION="${OTG_VERSION}" \
+            go -C "${RUNNER_TEMP}/otg-go-tooling/otg-go" test \
+              -tags instance_deployment_tests ./cmd/instance-deploy \
+              -run '^TestVerifyGeneratedXCSoftwarePayload$' -count=1
 
       - name: Smoke ARM64 programs and XC mode contracts
         run: |
