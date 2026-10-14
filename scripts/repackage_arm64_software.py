@@ -66,12 +66,12 @@ def repackage(args):
              "--archive", str(replacement)],
             check=True,
         )
+        actual = release_manifest(replacement)
+        if actual["source_commit"] != args.release_sha + "+" + args.tooling_sha:
+            raise ValueError("repackaged release lost its two-source identity")
         replacement_digest = replacement.with_name(replacement.name + ".sha256")
         os.replace(replacement, archive)
         os.replace(replacement_digest, archive.with_name(archive.name + ".sha256"))
-    actual = release_manifest(archive)
-    if actual["source_commit"] != args.release_sha + "+" + args.tooling_sha:
-        raise ValueError("repackaged release lost its two-source identity")
 
 
 def main():
