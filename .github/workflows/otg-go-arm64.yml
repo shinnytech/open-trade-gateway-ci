@@ -21,7 +21,7 @@ env:
   SOFTWARE_PAYLOAD_ARCH: arm64
   SOFTWARE_PAYLOAD_VARIANT: kylin-xc
   DIST_SOFTWARE: dist/xc/software
-  TOOLING_SHA: 4b23ee0128dba2046f3e2aea05f08cabdfad5468
+  TOOLING_SHA: 50bc1fe9f5d954f281ca70724de4830d1fbdd2be
 
 jobs:
   build:
