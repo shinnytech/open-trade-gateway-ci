@@ -285,31 +285,19 @@ jobs:
               -tags instance_deployment_tests ./cmd/instance-deploy \
               -run '^TestVerifyGeneratedXCSoftwarePayload$' -count=1
 
-      - name: Upload 2.3.16 branch payload
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: otg-go-2.3.16-arm64-xc
-          path: |
-            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz
-            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz.sha256
-          if-no-files-found: error
-          retention-days: 14
-
       - name: Smoke ARM64 programs and XC mode contracts
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import os, pathlib, subprocess
+          import pathlib, subprocess
           root = pathlib.Path('dist/xc/software/stage').resolve()
           # 打包器已独立核验所有 ELF 架构和依赖；这里在原生 ARM runner 实际执行入口。
           commands = [
               ['bin/otg', '-v'], ['bin/otgctl', 'version'], ['bin/api-gateway', '--help'],
               ['tools/instance-deploy', 'help'],
+              ['tools/instance-deploy', 'upload-receipt', '--help'],
               ['tools/jq', '--version'],
           ]
-          if os.environ['GITHUB_EVENT_NAME'] == 'repository_dispatch':
-              commands.append(['tools/instance-deploy', 'upload-receipt', '--help'])
           for command in commands:
               subprocess.run([str(root / command[0]), *command[1:]], check=True, timeout=30)
           PY
@@ -339,6 +327,17 @@ jobs:
               tools/otg-api-gateway-firewall.sh verify
               tools/otg-api-gateway-firewall.sh stop
             '
+
+      - name: Upload 2.3.16 branch payload
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: otg-go-2.3.16-arm64-xc
+          path: |
+            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz
+            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Install ossutil
         if: github.event_name == 'repository_dispatch'
