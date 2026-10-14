@@ -16,8 +16,11 @@ x86 软件包发布成功后发起请求，并等待本工作流的最终结果�
 普通分支 push、PR 更新和手动操作不会触发软件发布。
 
 请求携带确定的源码 SHA、版本、上游运行 ID、重跑次数和唯一请求 ID。工作流核对
-上游运行身份、PR 合并状态或 tag 指向，只构建对应提交。构建完成后核验文件摘要、
-ELF 架构及依赖，在原生 ARM runner 和麒麟 ARM 容器执行启动检查，再发布私有 OSS：
+上游运行身份、PR 合并状态或 tag 指向，只构建对应提交。运行程序取自该版本，
+目标机部署工具取自工作流固定的 `TOOLING_SHA`；重新封包后的 `source_commit`
+同时记录两个提交。构建完成后核验文件摘要、ELF 架构及依赖，并在原生 ARM
+runner 上生成测试实例包、执行其中的 `verify-extracted`，再到麒麟 ARM 容器
+执行启动检查，最后发布私有 OSS：
 
 ```text
 oss://shinny-cd/otg-go/<版本>/dist/software/otg-go_<版本>_arm64_kylin-xc.tar.gz
