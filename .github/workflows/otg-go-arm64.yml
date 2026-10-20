@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: 2.3.16 XC ARM64 分支的完整提交 SHA
+        description: 2.3.18 XC ARM64 分支的完整提交 SHA
         required: true
         type: string
       version:
@@ -93,7 +93,7 @@ jobs:
               output.write('source_event=' + run['event'] + '\n')
           PYCODE
 
-      - name: Validate 2.3.16 branch request
+      - name: Validate 2.3.18 branch request
         if: github.event_name == 'workflow_dispatch'
         id: manual
         env:
@@ -104,19 +104,19 @@ jobs:
           with open(os.environ['GITHUB_EVENT_PATH']) as handle:
               inputs = json.load(handle)['inputs']
           source_sha = inputs.get('source_sha', '')
-          if not re.fullmatch(r'[0-9a-f]{40}', source_sha) or inputs.get('version') != '2.3.16':
-              raise SystemExit('expected the exact 2.3.16 XC ARM64 branch SHA and version')
+          if not re.fullmatch(r'[0-9a-f]{40}', source_sha) or inputs.get('version') != '2.3.18':
+              raise SystemExit('expected the exact 2.3.18 XC ARM64 branch SHA and version')
           request = urllib.request.Request(
-              'https://api.github.com/repos/shinnytech/otg-go/git/ref/heads/release/2.3.16-xc-arm64',
+              'https://api.github.com/repos/shinnytech/otg-go/git/ref/heads/release/2.3.18-xc-arm64',
               headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
                        'Accept': 'application/vnd.github+json'})
           with urllib.request.urlopen(request, timeout=30) as response:
               branch = json.load(response)
           if branch['object']['sha'] != source_sha:
-              raise SystemExit('source SHA is not the current 2.3.16 XC ARM64 branch head')
+              raise SystemExit('source SHA is not the current 2.3.18 XC ARM64 branch head')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('source_sha=' + source_sha + '\n')
-              output.write('version=2.3.16\n')
+              output.write('version=2.3.18\n')
               output.write('source_event=workflow_dispatch\n')
           PYCODE
 
@@ -149,7 +149,7 @@ jobs:
             # 排队期间可能出现新 tag；只核对上游已选定的基线，不重新选版本。
             git merge-base --is-ancestor "refs/tags/${base_version}" "${SOURCE_SHA}"
           elif [[ "${SOURCE_EVENT}" == workflow_dispatch ]]; then
-            test "${RELEASE_VERSION}" = 2.3.16
+            test "${RELEASE_VERSION}" = 2.3.18
           else
             test "$(git rev-list -n 1 "refs/tags/${RELEASE_VERSION}")" = "${SOURCE_SHA}"
           fi
@@ -328,14 +328,14 @@ jobs:
               tools/otg-api-gateway-firewall.sh stop
             '
 
-      - name: Upload 2.3.16 branch payload
+      - name: Upload 2.3.18 branch payload
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: otg-go-2.3.16-arm64-xc
+          name: otg-go-2.3.18-arm64-xc
           path: |
-            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz
-            dist/xc/software/otg-go_2.3.16_arm64_kylin-xc.tar.gz.sha256
+            dist/xc/software/otg-go_2.3.18_arm64_kylin-xc.tar.gz
+            dist/xc/software/otg-go_2.3.18_arm64_kylin-xc.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14
 
