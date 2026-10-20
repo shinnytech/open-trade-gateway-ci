@@ -9,10 +9,9 @@ import textwrap
 import unittest
 from unittest.mock import patch
 
-WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/otg-go-arm64.yml'
-
-
 class SourceTests(unittest.TestCase):
+    WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/otg-go-arm64.yml'
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -24,7 +23,7 @@ class SourceTests(unittest.TestCase):
         self.pr = dict(merged_at='2026-09-21T00:00:00Z', merge_commit_sha='a' * 40,
                        base=dict(ref='master', repo=dict(full_name='shinnytech/otg-go')),
                        head=dict(sha='b' * 40))
-        text = WORKFLOW.read_text().split("python3 - <<'PYCODE'\n", 1)[1].split('          PYCODE\n', 1)[0]
+        text = self.WORKFLOW.read_text().split("python3 - <<'PYCODE'\n", 1)[1].split('          PYCODE\n', 1)[0]
         self.script = textwrap.dedent(text)
 
     def verify(self):
@@ -39,7 +38,7 @@ class SourceTests(unittest.TestCase):
                 data = [self.pr]
             return contextlib.closing(io.BytesIO(json.dumps(data).encode()))
         with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event), GITHUB_OUTPUT=str(output), GH_TOKEN='fixture'), patch('urllib.request.urlopen', open_url):
-            exec(compile(self.script, str(WORKFLOW), 'exec'), {})
+            exec(compile(self.script, str(self.WORKFLOW), 'exec'), {})
         result = dict(line.split('=', 1) for line in output.read_text().splitlines())
         self.assertEqual(result['source_sha'], self.payload['source_sha'])
         self.assertEqual(result['version'], self.payload['version'])
@@ -78,6 +77,10 @@ class SourceTests(unittest.TestCase):
         self.payload['version'] = '2.3.14\ninjected'
         with self.assertRaisesRegex(SystemExit, 'invalid dispatch field'):
             self.verify()
+
+
+class AMD64SourceTests(SourceTests):
+    WORKFLOW = Path(__file__).resolve().parents[1] / '.github/workflows/otg-go-amd64-xc.yml'
 
 
 if __name__ == '__main__':

@@ -202,8 +202,9 @@ jobs:
           test "$(uname -m)" = aarch64
           tooling="${RUNNER_TEMP}/otg-go-tooling"
           audit_dir="${RUNNER_TEMP}/release-payload-audit"
-          python3 "${RUNNER_TEMP}/otg-arm64-ci/scripts/repackage_arm64_software.py" \
+          python3 "${RUNNER_TEMP}/otg-arm64-ci/scripts/repackage_xc_software.py" \
             --archive "${DIST_SOFTWARE}/otg-go_${OTG_VERSION}_arm64_kylin-xc.tar.gz" \
+            --architecture arm64 \
             --stage "${DIST_SOFTWARE}/stage" \
             --tooling "${tooling}" \
             --installer "${RUNNER_TEMP}/instance-deploy" \
