@@ -32,7 +32,8 @@ oss://shinny-cd/otg-go/<版本>/dist/software/otg-go_<版本>_arm64_kylin-xc.tar
 
 接入顺序：先合并本仓库的工作流，再合并上游调用方。沿用仓库已有秘密：
 
-- `KYLIN_CI`：读取私有 otg-go 源码、Git LFS 和麒麟 GHCR 镜像。
+- `KYLIN_CI`：读取私有 otg-go 源码、Git LFS 和上游运行记录。
+- `KYLIN_GHCR_TOKEN`：读取 `shinny-chenyi` 命名空间下的麒麟 GHCR 镜像。冒烟测试使用 软件包构建元数据记录的镜像。
 - `OSS_ACCESS_KEY`、`OSS_SECRET_KEY`：读取及写入上述 OSS 前缀；使用公网加速 endpoint。
 
 上游仓库的 `KYLIN_CI` 另需向本仓库分发事件及读取 Actions 结果。
